@@ -1,0 +1,5 @@
+﻿repo: WSs-321/devops-k8s-agent-roadmap
+local_path: D:\project\devops-k8s-agent-roadmap
+timetable: timetable\75-day-plan.md
+logs_dir: logs
+labels: ["learning", "daily"]

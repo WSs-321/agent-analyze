@@ -1,0 +1,18 @@
+{
+  "name": "devops-k8s-learning",
+  "version": "1.0.0",
+  "description": "DevOps/K8s/Agent learning roadmap — project standards, learning workflow, and commit conventions",
+  "author": {
+    "name": "WSs-321"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "DevOps K8s Learning Roadmap",
+    "shortDescription": "学习路线项目标准、工作流与提交规范",
+    "longDescription": "管理 devops-k8s-agent-roadmap 学习项目的 Codex 插件。涵盖：学习四步流程（学习→总结→落盘→PR）、Git 提交规范、项目文件与代码标准。由 .trae/rules/ 迁移而来。",
+    "developerName": "WSs-321",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "遵循本项目的学习工作流和代码规范进行开发。"
+  }
+}
