@@ -31,3 +31,21 @@ Windows Task Scheduler 每天 23:30 执行 `scripts/daily-check.ps1`。
 - 学习四步流程（learning-flow）
 - Git 提交规范（git-commit-conventions）
 - 项目标准要求（project-standards）
+
+## Issue 记录
+
+每次创建的 Issue 都会自动保存到 `records/issues-log.json`，记录字段：
+
+| 字段 | 说明 |
+|------|------|
+| issue_number | GitHub Issue 编号 |
+| issue_url | Issue 链接 |
+| repo | 目标仓库 |
+| day / week / topic | 对应 timetable 中的 Day、周次、主题 |
+| task | 当日学习任务 |
+| target_files | 本次 Issue 涉及的关联文件 |
+| created_at | 创建时间 |
+| solution | 解决方案（手动填写，有则写） |
+| solved_at | 解决时间（手动填写） |
+
+记录的 `solution` 和 `solved_at` 字段初始为空，可以在 Issue 解决后手动编辑 `records/issues-log.json` 补全。

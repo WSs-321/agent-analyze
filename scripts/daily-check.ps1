@@ -12,6 +12,49 @@ function Write-Log {
     "$time $Message" | Out-File -FilePath $LogFile -Encoding utf8 -Append
 }
 
+function Save-IssueRecord {
+    param(
+        [string]$RepoFull,
+        [int]$IssueNumber,
+        [string]$IssueUrl,
+        [int]$Day,
+        [int]$Week,
+        [string]$Topic,
+        [string]$Task,
+        [string[]]$TargetFiles
+    )
+
+    $recordsFile = Join-Path $AgentPath "records\issues-log.json"
+    $record = [PSCustomObject]@{
+        issue_number = $IssueNumber
+        issue_url    = $IssueUrl
+        repo         = $RepoFull
+        day          = $Day
+        week         = $Week
+        topic        = $Topic
+        task         = $Task
+        target_files = $TargetFiles
+        created_at   = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        solution     = ""
+        solved_at    = $null
+    }
+
+    $records = @()
+    if (Test-Path $recordsFile) {
+        try {
+            $records = Get-Content $recordsFile -Encoding utf8 | ConvertFrom-Json
+            if ($records -isnot [array]) { $records = @($records) }
+        } catch {
+            Write-Log "WARN: 读取记录文件失败，重建: $_"
+            $records = @()
+        }
+    }
+
+    $records += $record
+    $records | ConvertTo-Json -Depth 3 | Out-File -FilePath $recordsFile -Encoding utf8
+    Write-Log "记录已保存: Issue #$IssueNumber -> $recordsFile"
+}
+
 function Invoke-TargetCheck {
     param(
         [string]$RepoFull,
@@ -156,7 +199,7 @@ function Invoke-TargetCheck {
     [void]$bodyLines.Add("<!-- 学习过程中遇到的问题 -->")
     [void]$bodyLines.Add("")
     [void]$bodyLines.Add("## ✅ 完成检查清单")
-    [void]$bodyLines.Add("- [ ] 学习日志: `logs/week-$weekStr/day-$dayStr.md`")
+    [void]$bodyLines.Add("- [ ] 学习日志: `$LogsDirRel/week-$weekStr/day-$dayStr.md`")
     [void]$bodyLines.Add("- [ ] 概念笔记: `docs/<主题>.md`（如需）")
     [void]$bodyLines.Add("- [ ] 代码变更已通过 feature 分支提 PR")
     [void]$bodyLines.Add("- [ ] 本 Issue 已关联对应 PR")
@@ -166,7 +209,6 @@ function Invoke-TargetCheck {
     [void]$bodyLines.Add("> 上一步: Day $prevDay — $prevTopic")
 
     $issueBody = $bodyLines -join "`n"
-    $labelArg = ($IssueLabels | ForEach-Object { "--label `"$_`"" }) -join " "
 
     # 7. 创建 Issue
     try {
@@ -177,7 +219,33 @@ function Invoke-TargetCheck {
             --label $IssueLabels[0] `
             --body $issueBody 2>&1
         Write-Log "Issue: $result"
-        Write-Log "标题: $title"
+
+        # 从 gh 返回中提取 issue number
+        # 返回格式: https://github.com/WSs-321/devops-k8s-agent-roadmap/issues/42
+        $issueUrl = $result.Trim()
+        $issueNumber = 0
+        if ($issueUrl -match "issues/(\d+)$") {
+            $issueNumber = [int]$Matches[1]
+        }
+
+        # 8. 保存 Issue 记录到本仓
+        $targetFilesList = @(
+            "timetable/$TimetableRel",
+            "$LogsDirRel/week-$weekStr/day-$dayStr.md"
+        )
+        if ($info.Output -and $info.Output -ne "-") {
+            $targetFilesList += "docs/$($info.Topic -replace '\s+','-').md"
+        }
+
+        Save-IssueRecord `
+            -RepoFull $RepoFull `
+            -IssueNumber $issueNumber `
+            -IssueUrl $issueUrl `
+            -Day $nextDay `
+            -Week $info.Week `
+            -Topic $info.Topic `
+            -Task $info.Task `
+            -TargetFiles $targetFilesList
     } catch {
         Write-Log "ERROR: 创建 Issue 失败: $_"
     }
@@ -197,7 +265,6 @@ if ($targetFiles.Count -eq 0) {
 Write-Log "发现 $($targetFiles.Count) 个目标仓库配置"
 
 foreach ($tf in $targetFiles) {
-    # 简易 YAML 解析（逐行读取 key: value）
     $config = @{}
     Get-Content $tf.FullName -Encoding utf8 | ForEach-Object {
         if ($_ -match "^\s*(\w+):\s*(.+)$") {
@@ -211,7 +278,6 @@ foreach ($tf in $targetFiles) {
     $logsDirRel = $config["logs_dir"]
     $labelsRaw = $config["labels"]
 
-    # 解析 labels: ["a","b"] -> @("a","b")
     $labels = @("daily")
     if ($labelsRaw) {
         $labels = $labelsRaw -replace '\[|\]|"' , '' -split ',' | ForEach-Object { $_.Trim() }
