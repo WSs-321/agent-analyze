@@ -9,65 +9,59 @@ alwaysApply: true
 ## 仓库结构
 
 ```
-.
-├── .codex-plugin/          # Codex 插件配置（技能文件）
-├── .github/
-│   ├── workflows/          # GitHub Actions 工作流
-│   ├── ISSUE_TEMPLATE/     # Issue 模板
-│   └── PULL_REQUEST_TEMPLATE.md
-├── .trae/                  # （历史）Trae 规则，迁移完成后可删除
-├── .vscode/
-├── app/                    # 示例应用代码（Node.js）
-│   ├── src/
-│   ├── test/
-│   ├── scripts/
-│   ├── Dockerfile
-│   └── package.json
-├── docs/                   # 概念笔记（每个新主题一篇 .md）
-├── examples/               # 示例文件（github-actions/）
-├── logs/                   # 每日学习日志
-│   ├── week-01/
-│   ├── week-03/
-│   └── week-04/
-├── projects/               # 项目验收标准
-├── templates/              # 文档模板
-├── timetable/              # 75 天学习计划
-├── tracks/                 # 学习路径跟踪文档
-├── README.md
-└── ROADMAP.md
+agent-analyze/
+├── .codex-plugin/          # Codex 插件（技能文件）
+├── .codex/                 # 项目文档
+├── scripts/
+│   └── daily-check.ps1     # 每日检测脚本
+├── targets/                # 目标仓库配置
+│   └── *.yaml
+├── records/
+│   └── issues-log.json     # Issue 记录（通过 PR 合入）
+└── README.md
 ```
 
 ## 文件规范
 
-- **Markdown 文件**：遵守 `.markdownlint.json` 配置（MD013/MD033/MD041 关闭）。
-- **Workflow 文件**：`.github/workflows/*.yml`，使用 kebab-case 命名。
-- **日志文件**：`logs/week-XX/day-XX.md`，使用 `templates/daily-log.md` 模板。
-- **笔记文件**：`docs/<主题>.md`，使用 kebab-case 命名。
-- **代码风格**：Node.js 项目遵守 ESLint 配置。
+- Markdown 文件遵守 markdownlint 配置
+- PowerShell 脚本使用 UTF8 编码
+- YAML 配置文件使用 `.yaml` 后缀
 
-## 学习记录规范
+## PR 自动合入策略（agent-analyze 自身）
 
-- 每天先读 `timetable/75-day-plan.md` 确认当日主题。
-- 学习日志包含：今日目标、实际完成、遇到的问题、解决方案、明日计划。
-- 日志模板参见 `templates/daily-log.md`。
+当每日检测创建 Issue 后，记录写入 `records/issues-log.json` 的变更通过 PR 自动合入：
 
-## 工作流规范
+```mermaid
+flowchart LR
+    A[创建/更新记录] --> B[git checkout -b record/issue-N-日期]
+    B --> C[git commit]
+    C --> D[git push]
+    D --> E[gh pr create]
+    E --> F[gh pr merge --squash --delete-branch]
+    F --> G[git checkout master]
+    G --> H[git pull]
+```
 
-- `.github/workflows/` 中每个 workflow 职责单一。
-- 命名：`ci-<功能>.yml`、`cd-<环境>.yml`、`security-<工具>.yml`。
-- 最小权限原则：每个 workflow 声明 `permissions`，不依赖默认权限。
-- 关键操作（push image、deploy）加 `if` 条件避免 PR 触发。
+详细规则：
+| 项目 | 内容 |
+|------|------|
+| 分支命名 | `record/issue-<编号>-<时间戳>` |
+| commit message | `记录 Issue #<编号> — <仓库名>` |
+| PR 标题 | `记录 Issue #<编号> — <仓库名>` |
+| 合入方式 | squash merge |
+| 合入后自动删除分支 | 是 |
+| 触发条件 | 每次创建 Issue 后立即执行 |
 
-## 代码提交规范
+这条策略保证 `records/issues-log.json` 的每次变更都有对应的 PR 可追溯。
 
-参见 `git-commit-conventions` skill。
+## Issue 状态同步策略
 
-## PR 合入规范
+每日检测时，除了扫描代码，还会检查已记录的 Issue 在目标仓库的状态：
 
-参见 `.github/PULL_REQUEST_TEMPLATE.md`。
+1. 读取 `records/issues-log.json` 中 `solved_at` 为空的记录
+2. 调用 `gh issue view` 检查对应 Issue 在目标仓库是否已关闭
+3. 若已关闭：自动更新记录中的 `solved_at` 时间戳，并通过 PR 合入
 
-核心原则：
-1. feature 分支 → 创建 PR → review → 用户批准 → squash merge
-2. 禁止向 `main` 直推
-3. PR 标题格式：`[Day XX] <变更摘要>`
-4. 合入方式：squash merge，保持 main 历史干净
+## 学习仓（devops-k8s-agent-roadmap）PR 规范
+
+参见该仓库的 `.github/PULL_REQUEST_TEMPLATE.md`。

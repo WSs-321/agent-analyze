@@ -12,6 +12,91 @@ function Write-Log {
     "$time $Message" | Out-File -FilePath $LogFile -Encoding utf8 -Append
 }
 
+function Invoke-GitPR {
+    param(
+        [string]$BranchName,
+        [string]$CommitMsg,
+        [string]$PrTitle,
+        [string]$PrBody
+    )
+    try {
+        Push-Location $AgentPath
+        git checkout master 2>&1 | Out-Null
+        git pull --ff-only origin master 2>&1 | Out-Null
+        git checkout -b $BranchName 2>&1 | Out-Null
+        git add "records/issues-log.json" 2>&1 | Out-Null
+        git commit -m $CommitMsg 2>&1 | Out-Null
+        git push -u origin $BranchName 2>&1 | Out-Null
+        $prUrl = gh pr create --base master --head $BranchName --title $PrTitle --body $PrBody 2>&1
+        Write-Log "PR: $prUrl"
+        gh pr merge --squash --delete-branch $prUrl 2>&1 | Out-Null
+        Write-Log "PR 已 squash merge"
+        git checkout master 2>&1 | Out-Null
+        git pull --ff-only origin master 2>&1 | Out-Null
+    } catch {
+        Write-Log "ERROR: PR 流程失败: $_"
+        try { git checkout master 2>&1 | Out-Null } catch {}
+    }
+    Pop-Location
+}
+
+function Sync-IssueStatus {
+    <#
+    同步 records/issues-log.json 中未解决的 Issue 状态
+    检查目标仓库中对应的 Issue 是否已关闭
+    #>
+    $recordsFile = Join-Path $AgentPath "records\issues-log.json"
+    if (-not (Test-Path $recordsFile)) { return }
+
+    $records = @()
+    try {
+        $records = Get-Content $recordsFile -Encoding utf8 | ConvertFrom-Json
+        if ($records -isnot [array]) { $records = @($records) }
+    } catch { return }
+
+    $updated = $false
+    $dateStr = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+
+    for ($i = 0; $i -lt $records.Count; $i++) {
+        $rec = $records[$i]
+        # 只处理未解决且有 issue_number 的记录
+        if ($rec.solved_at -ne $null -and $rec.solved_at -ne "") { continue }
+        if (-not $rec.issue_number -or $rec.issue_number -eq 0) { continue }
+
+        $repo = $rec.repo
+        $num = $rec.issue_number
+
+        try {
+            $state = gh issue view $num --repo $repo --json state,closedAt --jq "{state,closedAt}" 2>&1
+            if ($state -match '"state":\s*"CLOSED"') {
+                $closedAt = ""
+                if ($state -match '"closedAt":\s*"([^"]+)"') { $closedAt = $Matches[1] }
+                $records[$i].solved_at = $dateStr
+                $records[$i].solution = "目标仓库已关闭（$closedAt）"
+                Write-Log "Issue #$num ($repo) 已关闭，同步记录"
+                $updated = $true
+            }
+        } catch {
+            Write-Log "WARN: 查询 Issue #$num ($repo) 状态失败: $_"
+        }
+    }
+
+    if (-not $updated) { return }
+
+    # 保存更新
+    $records | ConvertTo-Json -Depth 3 | Out-File -FilePath $recordsFile -Encoding utf8
+
+    # 通过 PR 合入
+    $dt = Get-Date -Format "yyyyMMdd-HHmmss"
+    $branch = "record/sync-status-$dt"
+    $prBody = "## Issue 状态同步`n`n自动检测到以下 Issue 已在目标仓库关闭，更新记录中的 solved_at。"
+    Invoke-GitPR `
+        -BranchName $branch `
+        -CommitMsg "同步 Issue 状态 — $dt" `
+        -PrTitle "同步 Issue 状态 — $dt" `
+        -PrBody $prBody
+}
+
 function Invoke-RecordPR {
     param(
         [string]$RepoFull,
@@ -24,7 +109,6 @@ function Invoke-RecordPR {
 
     $recordsFile = Join-Path $AgentPath "records\issues-log.json"
 
-    # 构建记录对象
     $record = [PSCustomObject]@{
         issue_number  = $IssueNumber
         issue_url     = $IssueUrl
@@ -37,7 +121,6 @@ function Invoke-RecordPR {
         solved_at     = $null
     }
 
-    # 读取已有记录
     $records = @()
     if (Test-Path $recordsFile) {
         try {
@@ -48,37 +131,14 @@ function Invoke-RecordPR {
             $records = @()
         }
     }
-
     $records += $record
-    $recordsJson = ($records | ConvertTo-Json -Depth 3)
-
-    # 写文件
-    $recordsJson | Out-File -FilePath $recordsFile -Encoding utf8
+    $records | ConvertTo-Json -Depth 3 | Out-File -FilePath $recordsFile -Encoding utf8
     Write-Log "记录已写入: $recordsFile"
 
-    # === PR 自动合入流程 ===
-    $dateTag = Get-Date -Format "yyyyMMdd-HHmmss"
-    $branchName = "record/issue-$IssueNumber-$dateTag"
-
-    try {
-        Push-Location $AgentPath
-
-        # 拉取最新 master
-        git checkout master 2>&1 | Out-Null
-        git pull --ff-only origin master 2>&1 | Out-Null
-
-        # 创建分支、提交
-        git checkout -b $branchName 2>&1 | Out-Null
-        git add $recordsFile 2>&1 | Out-Null
-        git commit -m "记录 Issue #$IssueNumber — $RepoFull" 2>&1 | Out-Null
-        Write-Log "分支已提交: $branchName"
-
-        # 推送
-        git push -u origin $branchName 2>&1 | Out-Null
-        Write-Log "分支已推送"
-
-        # 创建 PR
-        $prBody = @"
+    # PR 自动合入
+    $dt = Get-Date -Format "yyyyMMdd-HHmmss"
+    $branch = "record/issue-$IssueNumber-$dt"
+    $prBody = @"
 ## 记录 Issue
 
 | 项目 | 内容 |
@@ -95,23 +155,12 @@ $(if ($TargetFiles.Count -gt 0) { ($TargetFiles | ForEach-Object { "- \`$_\`" })
 
 > 🤖 由 agent-analyze 自动提交
 "@
-        $prUrl = gh pr create --base master --head $branchName --title "记录 Issue #$IssueNumber — $RepoFull" --body $prBody 2>&1
-        Write-Log "PR 已创建: $prUrl"
 
-        # Squash merge 并删除分支
-        gh pr merge --squash --delete-branch $prUrl 2>&1 | Out-Null
-        Write-Log "PR 已 squash merge: $prUrl"
-
-        # 切回 master 拉取最新
-        git checkout master 2>&1 | Out-Null
-        git pull --ff-only origin master 2>&1 | Out-Null
-
-    } catch {
-        Write-Log "ERROR: PR 流程失败: $_"
-        # 恢复现场
-        try { git checkout master 2>&1 | Out-Null } catch {}
-    }
-    Pop-Location
+    Invoke-GitPR `
+        -BranchName $branch `
+        -CommitMsg "记录 Issue #$IssueNumber — $RepoFull" `
+        -PrTitle "记录 Issue #$IssueNumber — $RepoFull" `
+        -PrBody $prBody
 }
 
 function Invoke-TargetScan {
@@ -136,82 +185,83 @@ function Invoke-TargetScan {
 
     $findings = [System.Collections.ArrayList]@()
 
-    # 检查一：未合入分支
+    # 未合入分支
     try {
         Push-Location $LocalPath
         $unmerged = git branch -r --no-merged origin/main 2>&1 | Where-Object { $_ -match "^  remotes/origin/feature_" }
         if ($unmerged) {
-            $count = ($unmerged | Measure-Object).Count
-            $list = ($unmerged | ForEach-Object { $_.Trim() }) -join "`n"
+            $c = ($unmerged | Measure-Object).Count
             [void]$findings.Add([PSCustomObject]@{
-                Type="未合入分支"; Severity="info"; Summary="$count 个 feature 分支尚未合入 main"
-                Detail=$list; Fix="逐分支 review 后 squash merge"
-                Files=@()
+                Type="未合入分支"; Severity="info"
+                Summary="$c 个 feature 分支未合入 main"
+                Detail=($unmerged|ForEach-Object{$_.Trim()})-join "`n"
+                Fix="逐分支 review 后 squash merge"; Files=@()
             })
         }
         Pop-Location
     } catch {}
 
-    # 检查二：TODO/FIXME
+    # TODO/FIXME
     try {
         Push-Location $LocalPath
         $todo = Select-String -Path "app\src\*.js","app\test\*.js","app\scripts\*.js" -Pattern "(TODO|FIXME|HACK|XXX)" -CaseSensitive -SimpleMatch -ErrorAction SilentlyContinue
         if ($todo) {
-            $count = ($todo | Measure-Object).Count
-            $details = @(); $files=@{}
+            $c = ($todo|Measure-Object).Count; $dl=@(); $fh=@{}
             foreach ($m in $todo) {
-                $rp = $m.Path -replace [regex]::Escape($LocalPath+"\"),""
-                $files[$rp]=$true; $details += "$rp($($m.LineNumber)): $($m.Line.Trim())"
+                $rp=$m.Path -replace [regex]::Escape($LocalPath+"\"),""
+                $fh[$rp]=$true; $dl+="$rp($($m.LineNumber)): $($m.Line.Trim())"
             }
             [void]$findings.Add([PSCustomObject]@{
-                Type="待办标记"; Severity="warn"; Summary="代码中残留 $count 处 TODO/FIXME 标记"
-                Detail=($details|Select-Object -First 20)-join "`n"
+                Type="待办标记"; Severity="warn"
+                Summary="代码中残留 $c 处 TODO/FIXME"
+                Detail=($dl|Select-Object -First 20)-join "`n"
                 Fix="逐处 review，已完成则删除标记"
-                Files=$files.Keys|Sort-Object
+                Files=$fh.Keys|Sort-Object
             })
         }
         Pop-Location
     } catch {}
 
-    # 检查三：Workflow 规范
+    # Workflow 规范
     try {
         Push-Location $LocalPath
         $wf = Get-ChildItem ".github\workflows\*.yml" -File -ErrorAction SilentlyContinue
         if ($wf) {
-            $issues=@(); $allWf=@()
-            foreach ($w in $wf) { $allWf+=$w.Name; $c=Get-Content $w.FullName -Raw
-                if ($c -notmatch "^name:") { $issues += "- $($w.Name): 缺少 \`name\`" }
-                if ($c -notmatch "permissions:") { $issues += "- $($w.Name): 缺少 \`permissions\`" }
+            $is=@(); $aw=@()
+            foreach ($w in $wf) {
+                $aw+=$w.Name; $c=Get-Content $w.FullName -Raw
+                if ($c -notmatch "^name:"){$is+="- $($w.Name): 缺少 \`name\`"}
+                if ($c -notmatch "permissions:"){$is+="- $($w.Name): 缺少 \`permissions\`"}
             }
-            if ($issues.Count -gt 0) {
+            if ($is.Count -gt 0) {
                 [void]$findings.Add([PSCustomObject]@{
                     Type="Workflow 规范"; Severity="warn"
-                    Summary="$($issues.Count) 个 workflow 存在规范问题"
-                    Detail=$issues-join "`n"
-                    Fix="补全 name 和 permissions"
-                    Files=$allWf|Sort-Object
+                    Summary="$($is.Count) 个 workflow 存在问题"
+                    Detail=$is-join "`n"; Fix="补全 name + permissions"
+                    Files=$aw|Sort-Object
                 })
             }
         }
         Pop-Location
     } catch {}
 
-    # 检查四：未跟踪文件
+    # 未跟踪文件
     try {
         Push-Location $LocalPath
-        $untracked = git ls-files --others --exclude-standard 2>&1 | Where-Object { $_ -match "\.(md|yml|yaml|json|js)$" }
-        if ($untracked) {
-            $count = ($untracked | Measure-Object).Count
+        $ut = git ls-files --others --exclude-standard 2>&1 | Where-Object { $_ -match "\.(md|yml|yaml|json|js)$" }
+        if ($ut) {
+            $c = ($ut|Measure-Object).Count
             [void]$findings.Add([PSCustomObject]@{
-                Type="未跟踪文件"; Severity="info"; Summary="$count 个新文件未纳入版本管理"
-                Detail=($untracked-join "`n"); Fix="review 后 git add + commit"
-                Files=@($untracked)
+                Type="未跟踪文件"; Severity="info"
+                Summary="$c 个新文件未纳入版本管理"
+                Detail=$ut-join "`n"; Fix="review 后 git add + commit"
+                Files=@($ut)
             })
         }
         Pop-Location
     } catch {}
 
-    # 检查五：进度
+    # 进度
     try {
         Push-Location $LocalPath
         if (Test-Path "timetable\75-day-plan.md") {
@@ -247,7 +297,7 @@ function Invoke-TargetScan {
     $todayTag = "daily-"+(Get-Date -Format "yyyyMMdd")
     try {
         $existing = gh issue list --repo $RepoFull --label "AI" --state open --json title --jq ".[]|select(.title|startswith(\"[$todayTag]\"))" 2>&1
-        if ($existing) { Write-Log "今日已有 AI Issue，跳过"; return }
+        if ($existing) { Write-Log "今日已有 AI Issue"; return }
     } catch {}
 
     # 构建 Issue
@@ -291,26 +341,23 @@ function Invoke-TargetScan {
         [void]$lines.Add("### 涉及文件"); [void]$lines.Add("")
         foreach ($f in $allFiles) { [void]$lines.Add("- \`$f\`") }; [void]$lines.Add("")
     }
-    if (-not $warnings) { [void]$lines.Add("本次检测未发现需修复的问题，均为提示性信息。"); [void]$lines.Add("") }
-    [void]$lines.Add("---"); [void]$lines.Add("> 🤖 由 agent-analyze 自动提交 · 非人工操作")
+    if (-not $warnings) { [void]$lines.Add("本次检测未发现需修复的问题。") ;[void]$lines.Add("") }
+    [void]$lines.Add("---"); [void]$lines.Add("> 🤖 由 agent-analyze 自动提交")
     [void]$lines.Add("> 标签: \`AI\` \`daily\`")
     $issueBody = $lines -join "`n"
 
     $dateStr = Get-Date -Format "yyyyMMdd"
     $title = "[$dateStr] 代码分析 — $($warnings.Count) 个待处理"
 
-    # 创建 Issue
     try {
         $labelArgs = ""
         foreach ($lb in $IssueLabels) { $labelArgs += " --label `"$lb`"" }
         $result = gh issue create --repo $RepoFull --title $title $labelArgs --body $issueBody 2>&1
         Write-Log "Issue: $result"
 
-        $issueUrl = $result.Trim()
-        $issueNumber = 0
+        $issueUrl = $result.Trim(); $issueNumber = 0
         if ($issueUrl -match "issues/(\d+)$") { $issueNumber = [int]$Matches[1] }
 
-        # 保存记录 → 自动 PR 合入 agent-analyze
         Invoke-RecordPR `
             -RepoFull $RepoFull `
             -IssueNumber $issueNumber `
@@ -323,8 +370,15 @@ function Invoke-TargetScan {
     }
 }
 
-# === 主流程 ===
+# ===== 主流程 =====
 Write-Log "=== 每日代码分析开始 ==="
+
+# 阶段一：同步 Issue 状态（检查目标仓库已关闭的 Issue，更新记录）
+Write-Log "--- 阶段一: 同步 Issue 状态 ---"
+Sync-IssueStatus
+
+# 阶段二：扫描目标仓库
+Write-Log "--- 阶段二: 扫描目标仓库 ---"
 $targetsDir = Join-Path $AgentPath "targets"
 $targetFiles = Get-ChildItem "$targetsDir\*.yaml" -File -ErrorAction SilentlyContinue
 if ($targetFiles.Count -eq 0) { Write-Log "ERROR: 无配置"; exit 1 }
@@ -333,7 +387,7 @@ Write-Log "发现 $($targetFiles.Count) 个目标"
 foreach ($tf in $targetFiles) {
     $config = @{}
     Get-Content $tf.FullName -Encoding utf8 | ForEach-Object {
-        if ($_ -match "^\s*(\w+):\s*(.+)$") { $config[$Matches[1]] = $Matches[2].Trim().Trim('"',"'" ) }
+        if ($_ -match "^\s*(\w+):\s*(.+)$") { $config[$Matches[1]] = $Matches[2].Trim().Trim('"',"'") }
     }
     $r = $config["repo"]; $lp = $config["local_path"]; $lr = $config["labels"]
     if (-not $r -or -not $lp) { Write-Log "WARN: 配置不完整"; continue }
@@ -342,4 +396,5 @@ foreach ($tf in $targetFiles) {
     if ($lr) { $labels = $lr -replace '\[|\]|"','' -split ',' | ForEach-Object { $_.Trim() } }
     Invoke-TargetScan -RepoFull $r -LocalPath $lp -IssueLabels $labels
 }
+
 Write-Log "=== 每日代码分析结束 ==="
