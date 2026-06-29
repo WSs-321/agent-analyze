@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$AgentPath = "D:\project\agent-analyze",
     [string]$TargetName = "*"
 )
@@ -21,21 +21,24 @@ function Invoke-GitPR {
     )
     try {
         Push-Location $AgentPath
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
         git checkout master 2>&1 | Out-Null
         git pull --ff-only origin master 2>&1 | Out-Null
         git checkout -b $BranchName 2>&1 | Out-Null
         git add "records/issues-log.json" 2>&1 | Out-Null
         git commit -m $CommitMsg 2>&1 | Out-Null
         git push -u origin $BranchName 2>&1 | Out-Null
-        $prUrl = gh pr create --base master --head $BranchName --title $PrTitle --body $PrBody 2>&1
+        $prUrl = (gh pr create --base master --head $BranchName --title $PrTitle --body $PrBody 2>&1 | Out-String).Trim()
         Write-Log "PR: $prUrl"
         gh pr merge --squash --delete-branch $prUrl 2>&1 | Out-Null
         Write-Log "PR 已 squash merge"
         git checkout master 2>&1 | Out-Null
         git pull --ff-only origin master 2>&1 | Out-Null
+        $ErrorActionPreference = $eap
     } catch {
+        $ErrorActionPreference = $eap
         Write-Log "ERROR: PR 流程失败: $_"
-        try { git checkout master 2>&1 | Out-Null } catch {}
+        git checkout master 2>&1 | Out-Null
     }
     Pop-Location
 }
@@ -149,7 +152,7 @@ function Invoke-RecordPR {
 | 摘要 | $Summary |
 
 ### 涉及文件
-$(if ($TargetFiles.Count -gt 0) { ($TargetFiles | ForEach-Object { "- \`$_\`" }) -join "`n" } else { "（无）" })
+$(if ($TargetFiles.Count -gt 0) { ($TargetFiles | ForEach-Object { "- ``$_``" }) -join "`n" } else { "（无）" })
 
 ---
 
@@ -174,12 +177,15 @@ function Invoke-TargetScan {
 
     try {
         Push-Location $LocalPath
+        $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
         git checkout main 2>&1 | Out-Null
         git pull --ff-only 2>&1 | Out-Null
-        $branchInfo = "main @ $(git log -1 --format='%h %ai' 2>&1)"
+        $branchInfo = "main @ " + (git log -1 --format='%h %ai' 2>$null)
+        $ErrorActionPreference = $eap
         Write-Log "main 已更新: $branchInfo"
     } catch {
-        Write-Log "WARN: git pull 失败: $_"; Pop-Location; return
+        $ErrorActionPreference = $eap
+        Write-Log "WARN: git 更新失败: $_"; Pop-Location; return
     }
     Pop-Location
 
@@ -230,8 +236,8 @@ function Invoke-TargetScan {
             $is=@(); $aw=@()
             foreach ($w in $wf) {
                 $aw+=$w.Name; $c=Get-Content $w.FullName -Raw
-                if ($c -notmatch "^name:"){$is+="- $($w.Name): 缺少 \`name\`"}
-                if ($c -notmatch "permissions:"){$is+="- $($w.Name): 缺少 \`permissions\`"}
+                if ($c -notmatch "^name:"){$is+="- $($w.Name): 缺少 ``name``"}
+                if ($c -notmatch "permissions:"){$is+="- $($w.Name): 缺少 ``permissions``"}
             }
             if ($is.Count -gt 0) {
                 [void]$findings.Add([PSCustomObject]@{
@@ -301,8 +307,8 @@ function Invoke-TargetScan {
     } catch {}
 
     # 构建 Issue
-    $warnings = $findings|Where-Object{$_.Severity -eq "warn"}
-    $infos = $findings|Where-Object{$_.Severity -eq "info"}
+    $warnings = @($findings|Where-Object{$_.Severity -eq "warn"})
+    $infos = @($findings|Where-Object{$_.Severity -eq "info"})
     $allFiles = $findings|ForEach-Object{$_.Files}|Where-Object{$_}|Sort-Object -Unique
 
     $lines = [System.Collections.ArrayList]@()
@@ -331,7 +337,7 @@ function Invoke-TargetScan {
         [void]$lines.Add("### 建议变更"); [void]$lines.Add("")
         [void]$lines.Add("| 文件 | 建议操作 | 说明 |"); [void]$lines.Add("|------|----------|------|")
         foreach ($f in $warnings) { foreach ($file in $f.Files) {
-            [void]$lines.Add("| \`$file\` | 修复 | $($f.Fix) |")
+            [void]$lines.Add("| ``$file`` | 修复 | $($f.Fix) |")
         }}
         [void]$lines.Add(""); [void]$lines.Add("### 合入方式"); [void]$lines.Add("")
         [void]$lines.Add("````"); [void]$lines.Add("gh pr create --base main --head $bn")
@@ -339,20 +345,28 @@ function Invoke-TargetScan {
     }
     if ($allFiles.Count -gt 0) {
         [void]$lines.Add("### 涉及文件"); [void]$lines.Add("")
-        foreach ($f in $allFiles) { [void]$lines.Add("- \`$f\`") }; [void]$lines.Add("")
+        foreach ($f in $allFiles) { [void]$lines.Add("- ``$f``") }; [void]$lines.Add("")
     }
     if (-not $warnings) { [void]$lines.Add("本次检测未发现需修复的问题。") ;[void]$lines.Add("") }
     [void]$lines.Add("---"); [void]$lines.Add("> 🤖 由 agent-analyze 自动提交")
-    [void]$lines.Add("> 标签: \`AI\` \`daily\`")
+    [void]$lines.Add("> 标签: ``AI`` ``daily``")
     $issueBody = $lines -join "`n"
 
     $dateStr = Get-Date -Format "yyyyMMdd"
     $title = "[$dateStr] 代码分析 — $($warnings.Count) 个待处理"
 
     try {
-        $labelArgs = ""
-        foreach ($lb in $IssueLabels) { $labelArgs += " --label `"$lb`"" }
-        $result = gh issue create --repo $RepoFull --title $title $labelArgs --body $issueBody 2>&1
+        # 确保标签存在（缺失则创建）
+        foreach ($lb in $IssueLabels) {
+            $exists = gh label list --repo $RepoFull --json name --jq ".[].name" 2>$null | Where-Object { $_ -eq $lb }
+            if (-not $exists) {
+                gh label create $lb --repo $RepoFull --color "ededed" 2>&1 | Out-Null
+                Write-Log "已创建标签: $lb"
+            }
+        }
+        $labelArgs = @()
+        foreach ($lb in $IssueLabels) { $labelArgs += "--label"; $labelArgs += $lb }
+        $result = gh issue create --repo $RepoFull --title $title @labelArgs --body $issueBody 2>&1
         Write-Log "Issue: $result"
 
         $issueUrl = $result.Trim(); $issueNumber = 0
