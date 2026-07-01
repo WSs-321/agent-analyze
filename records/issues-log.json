@@ -63,5 +63,23 @@
         "created_at":  "2026-06-30 23:30:14",
         "solution":  "",
         "solved_at":  null
+    },
+    {
+        "issue_number":  50,
+        "issue_url":  "https://github.com/WSs-321/devops-k8s-agent-roadmap/issues/50",
+        "repo":  "WSs-321/devops-k8s-agent-roadmap",
+        "analysis_type":  "daily-scan",
+        "summary":  "发现 1 项: 1 个警告, 0 个提示",
+        "target_files":  [
+                             "cd-deploy.yml",
+                             "cd-env.yml",
+                             "ci-basic.yml",
+                             "ci-docker.yml",
+                             "ci-docs.yml",
+                             "ci-node.yml"
+                         ],
+        "created_at":  "2026-07-01 23:30:17",
+        "solution":  "",
+        "solved_at":  null
     }
 ]
