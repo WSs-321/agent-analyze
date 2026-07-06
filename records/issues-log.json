@@ -123,5 +123,19 @@
         "created_at":  "2026-07-05 21:30:11",
         "solution":  "",
         "solved_at":  null
+    },
+    {
+        "issue_number":  68,
+        "issue_url":  "https://github.com/WSs-321/devops-k8s-agent-roadmap/issues/68",
+        "repo":  "WSs-321/devops-k8s-agent-roadmap",
+        "analysis_type":  "daily-scan",
+        "summary":  "发现 1 项: 1 个警告, 0 个提示",
+        "target_files":  [
+                             "ci-basic.yml",
+                             "ci-docs.yml"
+                         ],
+        "created_at":  "2026-07-06 21:30:08",
+        "solution":  "",
+        "solved_at":  null
     }
 ]
